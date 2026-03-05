@@ -52,6 +52,11 @@ class SmartCartApp(tk.Frame):
         self.total       = 0.0
         self.saved       = 0.0
         self.stop_scanner = True   # background scan flag
+        
+        self._cam = None
+        self._last_barcode = None
+        self._cam_photo = None      # prevents ImageTk from being garbage-collected
+
 
         self.fonts = {
             "header": font.Font(family="Helvetica", size=24, weight="bold"),
@@ -111,7 +116,7 @@ class SmartCartApp(tk.Frame):
     def _create_widgets(self):
         main_frame = ttk.Frame(self, padding="30")
         main_frame.grid(row=0, column=0, sticky="nsew")
-        main_frame.columnconfigure(0, weight=1)
+        main_frame.columnconfigure(1, weight=2)
         main_frame.rowconfigure(1, weight=1)
 
         # Header row: title + weight indicator
@@ -186,6 +191,19 @@ class SmartCartApp(tk.Frame):
                                     background=THEME["primary"],
                                     foreground=THEME["white"])
         self.status_bar.grid(row=1, column=0, sticky="ew")
+        
+        # ── Live Camera Preview Panel ─────────────────────────────────────────────
+        self.camera_panel = ttk.Frame(main_frame, style="Card.TFrame")
+        self.camera_panel.grid(row=1, column=1, sticky="nsew", padx=(15, 0))
+        self.camera_panel.grid_remove()          # hidden until SCAN pressed
+
+        self.camera_label = tk.Label(
+            self.camera_panel,
+            text="📷 Camera Preview\n(Press SCAN to start)",
+            bg=THEME["card"], fg=THEME["gray"],
+            font=("Arial", 11), width=40, height=15
+        )
+        self.camera_label.pack(expand=True, fill="both", padx=4, pady=4)
 
         # Start live weight poll (every 1 s)
         self._poll_weight()
@@ -204,44 +222,132 @@ class SmartCartApp(tk.Frame):
         self.update_status("Scale tared (zeroed).", "info")
 
     # ── Background camera scanner ─────────────────────────────────────────────
-    def _background_scan(self):
-        SHOW_WINDOW = False   # Set True for debugging on a desktop with a display
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            self.after(0, lambda: self.update_status(
-                "Scanner: Camera not found.", "error"))
+    # ── Camera lifecycle ──────────────────────────────────────────────────────
+    def _start_camera(self):
+        """Initialise camera (picamzero on Pi, cv2 elsewhere) and begin polling."""
+        self._last_barcode = None
+        if IS_RASPBERRY_PI:
+            try:
+                from picamzero import Camera
+                self._cam = Camera()
+                self.update_status("Pi Camera ready — scanning…", "success")
+            except Exception as e:
+                self.update_status(f"Camera init failed: {e}", "error")
+                return
+        else:
+            self._cam = cv2.VideoCapture(0)
+            if not self._cam.isOpened():
+                self.update_status("Camera not found.", "error")
+                self._cam = None
+                return
+
+        self.camera_panel.grid()             # show preview panel
+        self.after(50, self._poll_camera)    # start Tkinter polling loop
+
+    def _poll_camera(self):
+        """
+        Runs on the Tkinter main thread via after().
+        Captures one frame, updates the preview label, decodes barcodes,
+        then reschedules itself at ~30 FPS.
+        """
+        if self.stop_scanner or self._cam is None:
+            self._stop_camera()
             return
 
-        last_barcode = None
-        while not self.stop_scanner:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            gray = cv2.cvtColor(cv2.resize(frame, (640, 480)),
-                                cv2.COLOR_BGR2GRAY)
-            barcodes = decode(gray, symbols=[
+        try:
+            if IS_RASPBERRY_PI:
+                raw = self._cam.capture_array()
+                # picamzero/picamera2 returns XBGR (4-channel) by default
+                if raw.ndim == 3 and raw.shape[2] == 4:
+                    # Drop the X channel and convert BGR → RGB
+                    frame_rgb = raw[:, :, 2::-1]
+                else:
+                    frame_rgb = raw                 # already RGB
+            else:
+                ret, bgr = self._cam.read()
+                if not ret:
+                    self.after(50, self._poll_camera)
+                    return
+                frame_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+            # ── Embed preview in Tkinter label ───────────────────────────────
+            img = Image.fromarray(frame_rgb).resize((320, 240))
+            photo = ImageTk.PhotoImage(img)
+            self.camera_label.config(image=photo, text="")
+            self._cam_photo = photo             # hold reference to prevent GC
+
+            # ── Barcode decode ────────────────────────────────────────────────
+            barcodes = decode(frame_rgb, symbols=[
                 ZBarSymbol.QRCODE, ZBarSymbol.EAN13, ZBarSymbol.CODE128])
 
             if not barcodes:
-                last_barcode = None
+                self._last_barcode = None
             else:
                 for bc in barcodes:
                     data = bc.data.decode("utf-8")
-                    if data != last_barcode:
+                    if data != self._last_barcode:
                         beep()
-                        last_barcode = data
+                        self._last_barcode = data
                         self.after(0, self._process_barcode, data)
 
-            if SHOW_WINDOW:
-                cv2.imshow("Scanner", frame)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
-            else:
-                time.sleep(0.01)   # ← replaces cv2.waitKey(10); no GUI needed
+        except Exception as e:
+            print(f"[Camera] Frame error: {e}")
 
-        cap.release()
-        if SHOW_WINDOW:            # ← only call when a window was actually opened
-            cv2.destroyAllWindows()
+        self.after(33, self._poll_camera)       # reschedule — ~30 FPS
+
+    def _stop_camera(self):
+        """Release camera resources and hide the preview panel."""
+        try:
+            if self._cam is not None:
+                if IS_RASPBERRY_PI:
+                    self._cam.close()           # picamzero cleanup
+                else:
+                    self._cam.release()         # cv2 cleanup
+        except Exception:
+            pass
+        self._cam = None
+        self._cam_photo = None
+        self.camera_label.config(image="", text="📷 Camera Stopped")
+        self.camera_panel.grid_remove()
+
+    # def _background_scan(self):
+    #     SHOW_WINDOW = False   # Set True for debugging on a desktop with a display
+    #     cap = cv2.VideoCapture(0)
+    #     if not cap.isOpened():
+    #         self.after(0, lambda: self.update_status(
+    #             "Scanner: Camera not found.", "error"))
+    #         return
+
+    #     last_barcode = None
+    #     while not self.stop_scanner:
+    #         ok, frame = cap.read()
+    #         if not ok:
+    #             break
+    #         gray = cv2.cvtColor(cv2.resize(frame, (640, 480)),
+    #                             cv2.COLOR_BGR2GRAY)
+    #         barcodes = decode(gray, symbols=[
+    #             ZBarSymbol.QRCODE, ZBarSymbol.EAN13, ZBarSymbol.CODE128])
+
+    #         if not barcodes:
+    #             last_barcode = None
+    #         else:
+    #             for bc in barcodes:
+    #                 data = bc.data.decode("utf-8")
+    #                 if data != last_barcode:
+    #                     beep()
+    #                     last_barcode = data
+    #                     self.after(0, self._process_barcode, data)
+
+    #         if SHOW_WINDOW:
+    #             cv2.imshow("Scanner", frame)
+    #             if cv2.waitKey(1) & 0xFF == ord("q"):
+    #                 break
+    #         else:
+    #             time.sleep(0.01)   # ← replaces cv2.waitKey(10); no GUI needed
+
+    #     cap.release()
+    #     if SHOW_WINDOW:            # ← only call when a window was actually opened
+    #         cv2.destroyAllWindows()
 
 
     # ── Barcode → DB lookup ───────────────────────────────────────────────────
@@ -429,6 +535,7 @@ class SmartCartApp(tk.Frame):
             }
             self.controller.shared_data["pending_checkout"] = True
             self.stop_scanner = True          # stop camera thread
+            self._stop_camera() 
             self.weight_validator.tare()      # reset scale for next customer
             self.update_status("Redirecting to Login…", "success")
             self.controller.show_frame("AuthApp")
