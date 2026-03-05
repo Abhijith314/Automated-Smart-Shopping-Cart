@@ -7,7 +7,7 @@ Changes from original:
   • WeightCheckPopup shows validation result before item lands in cart
   • Simulate mode triggers simulated weight addition for easy testing
 """
-
+import time
 import tkinter as tk
 from tkinter import ttk, messagebox, font
 import cv2
@@ -205,7 +205,7 @@ class SmartCartApp(tk.Frame):
 
     # ── Background camera scanner ─────────────────────────────────────────────
     def _background_scan(self):
-        SHOW_WINDOW = False   # Set True for debugging on desktop
+        SHOW_WINDOW = False   # Set True for debugging on a desktop with a display
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
             self.after(0, lambda: self.update_status(
@@ -218,7 +218,7 @@ class SmartCartApp(tk.Frame):
             if not ok:
                 break
             gray = cv2.cvtColor(cv2.resize(frame, (640, 480)),
-                                 cv2.COLOR_BGR2GRAY)
+                                cv2.COLOR_BGR2GRAY)
             barcodes = decode(gray, symbols=[
                 ZBarSymbol.QRCODE, ZBarSymbol.EAN13, ZBarSymbol.CODE128])
 
@@ -237,10 +237,12 @@ class SmartCartApp(tk.Frame):
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
             else:
-                cv2.waitKey(10)
+                time.sleep(0.01)   # ← replaces cv2.waitKey(10); no GUI needed
 
         cap.release()
-        cv2.destroyAllWindows()
+        if SHOW_WINDOW:            # ← only call when a window was actually opened
+            cv2.destroyAllWindows()
+
 
     # ── Barcode → DB lookup ───────────────────────────────────────────────────
     def _process_barcode(self, barcode_data: str):

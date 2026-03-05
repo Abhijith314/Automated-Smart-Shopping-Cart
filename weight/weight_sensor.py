@@ -42,7 +42,17 @@ class HX711Scale:
         try:
             from hx711 import HX711
             self._hx = HX711(dout_pin=HX711_DT_PIN, pd_sck_pin=HX711_SCK_PIN)
-            self._hx.set_scale_ratio(CALIBRATION_FACTOR)
+            self._calibration_factor = CALIBRATION_FACTOR
+            self._use_raw = False  # will be set True if set_scale_ratio is absent
+
+            if hasattr(self._hx, 'set_scale_ratio'):
+                # Newer gandalf15/HX711 API
+                self._hx.set_scale_ratio(CALIBRATION_FACTOR)
+            else:
+                # Older version (e.g. hx711==1.1.2.3): apply factor manually
+                self._use_raw = True
+                print("[WeightSensor] set_scale_ratio not found; using raw mode.")
+
             self.tare()
             self._available = True
             print("[WeightSensor] HX711 initialised successfully.")
@@ -51,7 +61,7 @@ class HX711Scale:
             self._available = False
 
     def tare(self):
-        """Zero the scale (call when cart is empty or after removing item)."""
+        """Zero the scale."""
         if self._available:
             try:
                 self._hx.zero()
@@ -64,34 +74,19 @@ class HX711Scale:
         if not self._available:
             return 0.0
         try:
-            readings = self._hx.get_weight_mean(samples)
+            if self._use_raw:
+                # Manual calibration path (older library)
+                raw = self._hx.get_raw_data_mean(samples)
+                if raw is False:         # library returns False on read failure
+                    return 0.0
+                readings = raw / self._calibration_factor
+            else:
+                readings = self._hx.get_weight_mean(samples)
             return max(0.0, round(readings, 1))
         except Exception as e:
             print(f"[WeightSensor] Read error: {e}")
             return 0.0
 
-    def stable_reading(self, timeout: float = 5.0, stable_window: float = 0.5,
-                       tolerance: float = 2.0) -> float:
-        """
-        Block until the reading is stable (not changing by more than
-        `tolerance` grams for `stable_window` seconds), then return it.
-        Falls back to a single snapshot after `timeout` seconds.
-        """
-        deadline = time.time() + timeout
-        last_value = self.read_grams()
-        stable_since = time.time()
-
-        while time.time() < deadline:
-            time.sleep(0.1)
-            current = self.read_grams()
-            if abs(current - last_value) <= tolerance:
-                if time.time() - stable_since >= stable_window:
-                    return current
-            else:
-                last_value = current
-                stable_since = time.time()
-
-        return self.read_grams()  # fallback single read
 
 
 # =============================================================================
