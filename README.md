@@ -71,3 +71,9 @@ Powered by a Raspberry Pi 4, load cells, computer vision, and a cloud-synchroniz
 
 ## 👨‍💻 Developer
 Developed as a final year B.Tech Computer Science Engineering main project.
+
+**Group Members:** 
+* [Abhijith Pratheesh](https://github.com/Abhijith314)
+* [Theja K](https://github.com/heyythejaa)
+* [Hasna Sherin](https://github.com/HasnaSherin)
+* Fadhil Sidhick
